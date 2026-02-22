@@ -10,4 +10,5 @@ var Cmd = &cobra.Command{
 
 func init() {
 	Cmd.AddCommand(disableCmd)
+	Cmd.AddCommand(enableCmd)
 }
