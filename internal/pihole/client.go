@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 )
+
+// ErrAlreadyEnabled is returned when ad blocking is already enabled.
+var ErrAlreadyEnabled = errors.New("ad blocking already enabled")
 
 // Client interacts with a Pi-hole v6 API.
 type Client struct {
@@ -48,7 +52,7 @@ func (c *Client) DisableBlocking(ctx context.Context, password string, timerSeco
 	}
 	defer c.logout(ctx, sid)
 
-	if err := c.setBlocking(ctx, sid, timerSeconds); err != nil {
+	if err := c.setBlocking(ctx, sid, false, timerSeconds); err != nil {
 		return fmt.Errorf("disable blocking: %w", err)
 	}
 	return nil
@@ -88,8 +92,58 @@ func (c *Client) authenticate(ctx context.Context, password string) (string, err
 	return authResp.Session.SID, nil
 }
 
-func (c *Client) setBlocking(ctx context.Context, sid string, timerSeconds int) error {
-	body, err := json.Marshal(blockingRequest{Blocking: false, Timer: timerSeconds})
+// EnableBlocking authenticates, checks the current status, and enables ad blocking if disabled.
+// Returns ErrAlreadyEnabled if blocking is already active.
+func (c *Client) EnableBlocking(ctx context.Context, password string) error {
+	sid, err := c.authenticate(ctx, password)
+	if err != nil {
+		return fmt.Errorf("authentication: %w", err)
+	}
+	defer c.logout(ctx, sid)
+
+	status, err := c.getBlockingStatus(ctx, sid)
+	if err != nil {
+		return fmt.Errorf("check status: %w", err)
+	}
+
+	if status == "enabled" {
+		return ErrAlreadyEnabled
+	}
+
+	if err := c.setBlocking(ctx, sid, true, 0); err != nil {
+		return fmt.Errorf("enable blocking: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) getBlockingStatus(ctx context.Context, sid string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url("/api/dns/blocking"), nil)
+	if err != nil {
+		return "", fmt.Errorf("create status request: %w", err)
+	}
+	req.Header.Set("X-FTL-SID", sid)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("status request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Blocking string `json:"blocking"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode status response: %w", err)
+	}
+	return result.Blocking, nil
+}
+
+func (c *Client) setBlocking(ctx context.Context, sid string, blocking bool, timerSeconds int) error {
+	body, err := json.Marshal(blockingRequest{Blocking: blocking, Timer: timerSeconds})
 	if err != nil {
 		return fmt.Errorf("marshal blocking request: %w", err)
 	}
